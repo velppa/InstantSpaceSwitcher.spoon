@@ -1,14 +1,14 @@
 --- === InstantSpaceSwitcher ===
 ---
---- Switch macOS Spaces using Option-1..0, per-display aware.
---- Primary display: ISS gesture (instant). Other displays: hs.spaces.gotoSpace.
---- Single menubar icon shows space on focused screen.
+--- Switch macOS Spaces instantly (no animation) using Option-1..0.
+--- Shows current space number with color in the menu bar.
+--- Uses iss.so native module loaded in-process for reliable gesture posting.
 
 local obj = {}
 obj.__index = obj
 
 obj.name = "InstantSpaceSwitcher"
-obj.version = "4.3.0"
+obj.version = "3.2.0"
 
 -- Load ISS native Lua C module
 local issLoader = package.loadlib(os.getenv("HOME") .. "/.local/lib/iss.so", "luaopen_iss")
@@ -88,27 +88,9 @@ local function refreshMenuBar(self)
    end
 end
 
-local function isPrimaryScreen()
-   local screen = hs.mouse.getCurrentScreen()
-   local primary = hs.screen.primaryScreen()
-   return screen and primary and screen:getUUID() == primary:getUUID()
-end
-
 function switchToSpace(self, index)
-   if isPrimaryScreen() then
-      -- Primary display: ISS gesture (instant, no animation)
-      if iss.switchToIndex(index - 1) then
-         updateMenuBar(self, index)
-      end
-   else
-      -- Secondary display: use hs.spaces.gotoSpace with space ID
-      local screen = hs.mouse.getCurrentScreen()
-      if screen then
-         local spaces = hs.spaces.spacesForScreen(screen:getUUID())
-         if spaces and spaces[index] then
-            hs.spaces.gotoSpace(spaces[index])
-         end
-      end
+   if iss.switchToIndex(index - 1) then
+      updateMenuBar(self, index)
    end
 end
 
