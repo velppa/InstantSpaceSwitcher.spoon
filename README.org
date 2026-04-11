@@ -145,9 +145,9 @@ Standalone Swift CLI that prints the title of an app's most recently
 focused window using the Accessibility API
 (=kAXFocusedWindowAttribute=).
 
-Used by =mac-link-grab= to get the correct Safari window title across
-Spaces.  AppleScript's =front document= is not Space-aware;
-=AXFocusedWindow= is.
+Used by =mac-link-grab= function (below) to get the correct Safari
+window title across Spaces.  AppleScript's =front document= is not
+Space-aware; =AXFocusedWindow= is.
 
 #+begin_src sh
 frontmost-window Safari  # → "Hacker News"
@@ -160,4 +160,60 @@ Spaces.
 
 #+begin_src sh
 swiftc -O -o ~/.local/bin/frontmost-window frontmost-window.swift
+#+end_src
+
+** mac-link-grab Elisp function
+
+The function calls frontmost-window, then osascript to get url and the
+title of the current tab in a browser (Safari for the author), then
+inserts it at point as Org Mode or Markdown link.
+
+Bind it to a handful key, like ={C-c g}= and adding links to notes
+becoming a breeze.
+
+#+begin_src elisp
+(use-package dash)
+(require 'rx)
+
+(cl-defun mac-link-grab (&key (app "Safari") (markup "org"))
+  "Insert the URL of the frontmost window of the APP as MARKUP link."
+  (interactive)
+  (let* ((title (when (use-region-p)
+                  (let* ((beg (region-beginning))
+                         (end (region-end))
+                         (title (buffer-substring-no-properties beg end)))
+                    (delete-region beg end)
+                    title)))
+         ;; (notion-rx (rx "https://www.notion.so/"))
+         (format-link (lambda (s)
+                        (let* ((lines (string-split s (rx "\n")))
+                               (url (car lines))
+                               (url-title (cadr lines))
+                               (page-title
+                                (cond
+                                 ;; ((string-match notion-rx url) (format "%s | Notion" url-title))
+                                 (t url-title)))
+                               (title (or title page-title)))
+                          (cond ((equal markup "org") (format "[[%s][%s]]" url title))
+                                ((equal markup "md") (format "[%s](%s)" title url)))))))
+    (-->
+      "frontmost-window %s"
+      (format it app)
+      shell-command-to-string
+      string-trim
+      (format "tell application \"%s\"
+                 repeat with w in windows
+                   if name of w is \"%s\" then
+                     set theUrl to URL of current tab of w
+                     set theName to name of w
+                     return theUrl & \"\n\" & theName
+                   end if
+                 end repeat
+               end tell" app it)
+      do-applescript
+      (string-trim it "\"" "\"")
+      (funcall format-link it)
+      insert)))
+
+(keymap-global-set "C-c g" #'mac-link-grab)
 #+end_src
