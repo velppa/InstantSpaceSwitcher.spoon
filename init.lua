@@ -89,16 +89,37 @@ local function refreshMenuBar(self)
 end
 
 function switchToSpace(self, index)
+   self._lastApp = hs.application.frontmostApplication()
    if iss.switchToIndex(index - 1) then
       updateMenuBar(self, index)
    end
 end
 
-function obj:start()
-   if not iss.init() then
-      hs.alert.show("ISS: failed to init event tap", 2)
-      return self
+--- Open a new window of the app that was frontmost before the last space switch.
+--- Useful on empty spaces: switch to a new space, then call this to bring your app there.
+function obj:newWindowOfLastApp()
+   local app = self._lastApp
+   if not app then return end
+   local currentSpace = hs.spaces.focusedSpace()
+   local windowsBefore = {}
+   for _, w in ipairs(app:allWindows()) do
+      windowsBefore[w:id()] = true
    end
+   app:selectMenuItem({"File", "New Window"}, true)
+   hs.timer.doAfter(0.3, function()
+      for _, w in ipairs(app:allWindows()) do
+         if not windowsBefore[w:id()] then
+            hs.spaces.moveWindowToSpace(w:id(), currentSpace)
+            w:focus()
+            return
+         end
+      end
+   end)
+end
+
+function obj:start()
+   -- Note: iss.init() event tap is NOT used. Hammerspoon already has
+   -- its own event loop; CGEventPost works without a separate tap.
 
    -- Menu bar indicator with dropdown
    self._menubar = hs.menubar.new()
@@ -142,7 +163,6 @@ function obj:stop()
       self._menubar:delete()
       self._menubar = nil
    end
-   iss.destroy()
    return self
 end
 

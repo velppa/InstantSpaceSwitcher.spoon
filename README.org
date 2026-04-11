@@ -1,0 +1,173 @@
+#+title: InstantSpaceSwitcher.spoon
+#+startup: overview
+
+This repo contains two things: InstantSpaceSwitcher.spoon and
+frontmost-window utility.
+
+* 1. InstantSpaceSwitcher.spoon
+A [[https://www.hammerspoon.org/][Hammerspoon]] Spoon that switches macOS Spaces instantly (no
+animation) using =Option-1= through =Option-0=.  Shows the current space
+number as a pastel-colored circle in the menu bar.  Built on top of
+[[https://github.com/jurplel/InstantSpaceSwitcher][jurplel/InstantSpaceSwitcher]]'s C library.
+
+** How space switching works
+The switching happens in three layers:
+
+*** Layer 1: Hammerspoon hotkey → Lua (=init.lua=)
+
+=Option-5= → =switchToSpace(self, 5)= → =iss.switchToIndex(4)= (0-indexed)
+
+*** Layer 2: Lua C binding (=src/iss_lua.c=)
+
+Thin wrapper that exposes ISS C functions to Lua via =package.loadlib=.
+No switching logic here — just marshals arguments and calls into ISS.
+
+| Lua function        | C function                  | Purpose                     |
+|---------------------+-----------------------------+-----------------------------|
+| =iss.switchToIndex= | =iss_switch_to_index()=     | Switch to space N           |
+| =iss.getSpaceInfo=  | =iss_get_menubar_space_info()= | Get current space + count |
+
+*** Layer 3: ISS C library (upstream =ISS.c=)
+
+=iss_switch_to_index(targetIndex)= does the actual work:
+
+1. *Query current state*: calls =CGSCopyManagedDisplaySpaces()= and
+   =CGSGetActiveSpace()= (private CoreGraphics APIs) to discover how
+   many spaces exist and which one is active.
+
+2. *Calculate steps*: determines direction (left/right) and number of
+   steps from current space to target space.  E.g. moving from space
+   2 to space 5 = 3 steps right.
+
+3. *Post synthetic gestures*: for each step, calls
+   =iss_post_switch_gesture()= which creates two pairs of =CGEvent=
+   objects that mimic a high-velocity trackpad "dock swipe":
+
+   #+begin_example
+   Begin gesture:
+     Event A: kCGSEventGesture (marks gesture start)
+     Event B: kCGSEventDockControl + kIOHIDEventTypeDockSwipe
+              phase=Began, direction=left|right
+
+   End gesture:
+     Event A: kCGSEventGesture (marks gesture end)
+     Event B: kCGSEventDockControl + kIOHIDEventTypeDockSwipe
+              phase=Ended, swipeProgress=±2.0, velocity=±400.0
+   #+end_example
+
+   These events are posted via =CGEventPost(kCGSessionEventTap, ...)=.
+   The extreme velocity (400) and progress (2.0) values cause macOS
+   to complete the space transition instantly, skipping the swipe
+   animation entirely.
+
+*** Why no =iss_init()= event tap?
+The ISS library creates a =CGEventTap= for =kCGEventKeyDown/Up= in
+=iss_init()=.  This was needed for the standalone ISS app to keep the
+process registered with the window server.
+
+Hammerspoon already has its own event tap and event loop, so
+=CGEventPost= works without it.  Worse, the ISS event tap *conflicts*
+with Hammerspoon's on config reload — creating duplicate taps that
+cause crashes.  We skip =iss_init()= entirely.
+
+** Menu bar indicator
+A colored circle with the space number, rendered via =hs.canvas= into
+=hs.menubar=.  Ten pastel colors (red through gray) map to spaces
+1-10.  Auto-contrast text: white on dark backgrounds, black on light.
+
+Icons are pre-generated at load time.  Creating/deleting =hs.canvas=
+objects on every space switch caused Hammerspoon crashes.
+
+=hs.spaces.watcher= updates the icon when spaces change via trackpad
+swipe or Mission Control.
+
+** Files
+
+| File                       | Purpose                                             |
+|----------------------------+-----------------------------------------------------|
+| =init.lua=                   | Hammerspoon Spoon: hotkeys, menu bar, space watcher |
+| =src/iss_lua.c=              | Lua 5.4 C module binding ISS library to Lua         |
+| =src/frontmost-window.swift= | CLI: print focused window title (AXFocusedWindow)   |
+
+** Prerequisites
+- macOS (tested on Sequoia 15.x)
+- [[https://www.hammerspoon.org/][Hammerspoon.app]] installed in =/Applications=
+- Xcode Command Line Tools (=xcode-select --install=)
+- Accessibility permissions for Hammerspoon (System Settings →
+  Privacy & Security → Accessibility)
+
+** Build
+All source is self-contained in =src/=.  No external dependencies
+beyond Hammerspoon's bundled LuaSkin framework.
+
+Compile =iss_lua.c= (Lua bindings) and =ISS.c= (gesture posting)
+into a shared library that Hammerspoon loads at runtime.
+
+#+begin_src sh :results silent
+SRC=~/Developer/src/github.com/velppa/InstantSpaceSwitcher.spoon/src
+LUA_FW=/Applications/Hammerspoon.app/Contents/Frameworks
+
+mkdir -p ~/.local/lib
+
+clang -shared -o ~/.local/lib/iss.so \
+  $SRC/iss_lua.c $SRC/ISS.c \
+  -I $SRC \
+  -I "$LUA_FW/LuaSkin.framework/Headers" \
+  -F "$LUA_FW" \
+  -framework LuaSkin -framework ApplicationServices -framework CoreFoundation -framework IOKit \
+  -rpath "$LUA_FW"
+#+end_src
+
+** Install
+1. Symlink the Spoon into Hammerspoon's directory
+  #+begin_src sh
+ln -s ~/Developer/src/github.com/velppa/InstantSpaceSwitcher.spoon \
+  ~/.hammerspoon/Spoons/InstantSpaceSwitcher.spoon
+  #+end_src
+
+  #+RESULTS:
+
+2. Build iss.so (see Build section above)
+
+3. Add to =~/.hammerspoon/init.lua=:
+  : hs.loadSpoon("InstantSpaceSwitcher"):start()
+
+4. Reload Hammerspoon config (or restart Hammerspoon)
+
+** Usage
+After loading, you should see a colored circle in the menu bar showing
+your current space number.  Add 10 Desktops.  Press =Option-3= to switch
+to space 3 instantly.
+
+** Limitations
+- *Single display only*: the ISS gesture is global — macOS directs it
+  to whichever display it considers active.  Per-display switching via
+  =SLSManagedDisplaySetCurrentSpace= (SkyLight private API) was
+  attempted but crashed Hammerspoon.  =hs.spaces.gotoSpace(spaceID)=
+  works per-display but flashes Mission Control.
+- *Sequential stepping*: switching from space 1 to space 10 posts 9
+  consecutive gesture events.  In practice this is still instant, but
+  there may be edge cases with very high space counts.
+- *macOS updates*: relies on undocumented =CGS*= private APIs and
+  synthetic gesture event fields.  May break with macOS updates.
+* 2. frontmost-window
+Standalone Swift CLI that prints the title of an app's most recently
+focused window using the Accessibility API
+(=kAXFocusedWindowAttribute=).
+
+Used by =mac-link-grab= to get the correct Safari window title across
+Spaces.  AppleScript's =front document= is not Space-aware;
+=AXFocusedWindow= is.
+
+#+begin_src sh
+frontmost-window Safari  # → "Hacker News"
+#+end_src
+
+** Build
+Prints the focused window title for a given app.  Used by
+=mac-link-grab= Emacs package to get the correct Safari URL across
+Spaces.
+
+#+begin_src sh
+swiftc -O -o ~/.local/bin/frontmost-window frontmost-window.swift
+#+end_src
