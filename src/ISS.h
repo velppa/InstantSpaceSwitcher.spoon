@@ -3,14 +3,6 @@
 
 #include <stdbool.h>
 
-/** @brief Initialize resources
- * @return true on success, false on failure
- */
-bool iss_init(void);
-
-/** @brief Clean up resources */
-void iss_destroy(void);
-
 /** @brief The direction to switch spaces towards */
 typedef enum {
     ISSDirectionLeft = 0,
@@ -26,33 +18,11 @@ typedef struct {
 } ISSSpaceInfo;
 
 /**
- * @brief Performs the space switch if the requested move is within bounds.
- * @param direction The direction to switch spaces towards
- * @return true if the switch was posted, false if blocked by bounds or errors
- */
-bool iss_switch(ISSDirection direction);
-
-/**
- * @brief Retrieves the current space info for the display where the cursor is located.
- * @param info Output pointer that receives the info struct.
- * @return true on success, false if unavailable (e.g. API failure)
- */
-bool iss_get_space_info(ISSSpaceInfo *info);
-
-/**
  * @brief Retrieves the current space info for the active menu-bar display.
  * @param info Output pointer that receives the info struct.
  * @return true on success, false if unavailable (e.g. API failure)
  */
 bool iss_get_menubar_space_info(ISSSpaceInfo *info);
-
-/**
- * @brief Determines if a move in the given direction is allowed for the info.
- * @param info Space info snapshot.
- * @param direction Desired direction to move.
- * @return true if the move is permissible.
- */
-bool iss_can_move(ISSSpaceInfo info, ISSDirection direction);
 
 /**
  * @brief Attempts to switch directly to the provided space index.

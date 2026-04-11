@@ -118,9 +118,6 @@ function obj:newWindowOfLastApp()
 end
 
 function obj:start()
-   -- Note: iss.init() event tap is NOT used. Hammerspoon already has
-   -- its own event loop; CGEventPost works without a separate tap.
-
    -- Menu bar indicator with dropdown
    self._menubar = hs.menubar.new()
    self._menubar:setMenu(function() return buildMenu(self) end)

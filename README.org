@@ -60,16 +60,6 @@ No switching logic here — just marshals arguments and calls into ISS.
    to complete the space transition instantly, skipping the swipe
    animation entirely.
 
-*** Why no =iss_init()= event tap?
-The ISS library creates a =CGEventTap= for =kCGEventKeyDown/Up= in
-=iss_init()=.  This was needed for the standalone ISS app to keep the
-process registered with the window server.
-
-Hammerspoon already has its own event tap and event loop, so
-=CGEventPost= works without it.  Worse, the ISS event tap *conflicts*
-with Hammerspoon's on config reload — creating duplicate taps that
-cause crashes.  We skip =iss_init()= entirely.
-
 ** Menu bar indicator
 A colored circle with the space number, rendered via =hs.canvas= into
 =hs.menubar=.  Ten pastel colors (red through gray) map to spaces

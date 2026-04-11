@@ -54,26 +54,13 @@ extern CFStringRef CGSCopyActiveMenuBarDisplayIdentifier(CGSConnectionID connect
 extern CGSConnectionID CGSMainConnectionID(void) __attribute__((weak_import));
 extern CGSSpaceID CGSGetActiveSpace(CGSConnectionID connection) __attribute__((weak_import));
 
-static CFMachPortRef globalTap = NULL;
-static CFRunLoopSourceRef globalSource = NULL;
-
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
                                             ISSSpaceInfo *outInfo);
 static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
 static bool iss_post_switch_gesture(ISSDirection direction);
-static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction);
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction);
-
-// Event tap callback (required but can be empty)
-static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, 
-                                   CGEventRef event, void *refcon) {
-    (void)proxy;
-    (void)type;
-    (void)refcon;
-    return event;
-}
 
 static bool cgs_symbols_available(void) {
     return (&CGSMainConnectionID != NULL) &&
@@ -266,10 +253,6 @@ static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direc
     return info->currentIndex + 1 >= info->spaceCount;
 }
 
-bool iss_can_move(ISSSpaceInfo info, ISSDirection direction) {
-    return !iss_should_block_switch(&info, direction);
-}
-
 static bool iss_post_switch_gesture(ISSDirection direction) {
     const bool isRight = (direction == ISSDirectionRight);
 
@@ -344,45 +327,6 @@ static bool iss_post_switch_gesture(ISSDirection direction) {
     return true;
 }
 
-bool iss_init(void) {
-    if (globalTap) {
-        return true;
-    }
-
-    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
-    globalTap = CGEventTapCreate(
-        kCGSessionEventTap,
-        kCGHeadInsertEventTap,
-        kCGEventTapOptionDefault,
-        mask,
-        eventTapCallback,
-        NULL
-    );
-
-    if (!globalTap) {
-        return false;
-    }
-
-    globalSource = CFMachPortCreateRunLoopSource(NULL, globalTap, 0);
-    CFRunLoopAddSource(CFRunLoopGetMain(), globalSource, kCFRunLoopCommonModes);
-    CGEventTapEnable(globalTap, true);
-
-    return true;
-}
-
-void iss_destroy(void) {
-    if (globalTap) {
-        CGEventTapEnable(globalTap, false);
-        if (globalSource) {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), globalSource, kCFRunLoopCommonModes);
-            CFRelease(globalSource);
-            globalSource = NULL;
-        }
-        CFRelease(globalTap);
-        globalTap = NULL;
-    }
-}
-
 bool iss_get_space_info(ISSSpaceInfo *info) {
     if (!info) {
         return false;
@@ -399,26 +343,6 @@ bool iss_get_menubar_space_info(ISSSpaceInfo *info) {
 
     memset(info, 0, sizeof(*info));
     return load_space_info_for_display(info, false);
-}
-
-static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction) {
-    if (iss_should_block_switch(info, direction)) {
-        return false;
-    }
-    if (!iss_post_switch_gesture(direction)) {
-        return false;
-    }
-
-    return true;
-}
-
-bool iss_switch(ISSDirection direction) {
-    ISSSpaceInfo info;
-    if (iss_get_space_info(&info)) {
-        return iss_switch_with_info(&info, direction);
-    }
-
-    return iss_post_switch_gesture(direction);
 }
 
 bool iss_switch_to_index(unsigned int targetIndex) {
