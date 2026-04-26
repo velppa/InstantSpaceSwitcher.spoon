@@ -8,7 +8,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "InstantSpaceSwitcher"
-obj.version = "3.2.0"
+obj.version = "3.3.0"
 
 -- Load ISS native Lua C module
 local issLoader = package.loadlib(os.getenv("HOME") .. "/.local/lib/iss.so", "luaopen_iss")
@@ -117,6 +117,106 @@ function obj:newWindowOfLastApp()
    end)
 end
 
+--- Register as the system HTTP/HTTPS URL handler.
+--- Tracks the last-focused Safari window and opens URLs in it,
+--- navigating to its space first.
+--- Call this before :start() or after; it is idempotent.
+function obj:enableURLHandler()
+   -- Track last-focused Safari window
+   self._lastSafariWindow = nil
+   self._safariFilter = hs.window.filter.new("Safari")
+   self._safariFilter:subscribe(hs.window.filter.windowFocused, function(win)
+      if win then self._lastSafariWindow = win end
+   end)
+
+   -- Become the default handler for http and https
+   hs.urlevent.setDefaultHandler("http")
+   hs.urlevent.httpCallback = function(_scheme, _host, _params, fullURL, _senderPID)
+      self:_openURLInLastSafariWindow(fullURL)
+   end
+
+   return self
+end
+
+function obj:_openURLInLastSafariWindow(url)
+   local escaped = url:gsub("\\", "\\\\"):gsub('"', '\\"')
+
+   -- First, look for an existing tab with this URL in any Safari window
+   local findScript = string.format([[
+      tell application "Safari"
+         repeat with w in windows
+            set tabIndex to 0
+            repeat with t in tabs of w
+               set tabIndex to tabIndex + 1
+               if URL of t is "%s" then
+                  return (id of w as string) & "," & tabIndex
+               end if
+            end repeat
+         end repeat
+         return ""
+      end tell
+   ]], escaped)
+   local ok, result = hs.osascript.applescript(findScript)
+   if ok and type(result) == "string" and result ~= "" then
+      local winIDStr, tabIdxStr = result:match("^(%-?%d+),(%d+)$")
+      local winID = tonumber(winIDStr)
+      local tabIdx = tonumber(tabIdxStr)
+      if winID and tabIdx then
+         local existingWin = hs.window.get(winID)
+         if existingWin then
+            local spaces = hs.spaces.windowSpaces(existingWin)
+            if spaces and #spaces > 0 then
+               hs.spaces.gotoSpace(spaces[1])
+            end
+         end
+         local activateScript = string.format([[
+            tell application "Safari"
+               tell window id %d
+                  set current tab to tab %d
+                  set index to 1
+               end tell
+               activate
+            end tell
+         ]], winID, tabIdx)
+         hs.osascript.applescript(activateScript)
+         return
+      end
+   end
+
+   local win = self._lastSafariWindow
+   if not win or not win:application() then
+      hs.urlevent.openURLWithBundle(url, "com.apple.Safari")
+      return
+   end
+
+   local spaces = hs.spaces.windowSpaces(win)
+   if spaces and #spaces > 0 then
+      hs.spaces.gotoSpace(spaces[1])
+   end
+
+   local winID = win:id()
+   local script = string.format([[
+      tell application "Safari"
+         tell window id %d
+            set t to make new tab with properties {URL:"%s"}
+            set current tab to t
+         end tell
+         activate
+      end tell
+   ]], winID, escaped)
+   hs.osascript.applescript(script)
+end
+
+function obj:disableURLHandler()
+   if self._safariFilter then
+      self._safariFilter:unsubscribeAll()
+      self._safariFilter = nil
+   end
+   self._lastSafariWindow = nil
+   hs.urlevent.httpCallback = nil
+   return self
+end
+
 function obj:start()
    -- Menu bar indicator with dropdown
    self._menubar = hs.menubar.new()
@@ -146,6 +246,7 @@ function obj:start()
 end
 
 function obj:stop()
+   self:disableURLHandler()
    if self._hotkeys then
       for _, hk in ipairs(self._hotkeys) do
          hk:delete()
