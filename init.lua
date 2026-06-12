@@ -8,7 +8,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "InstantSpaceSwitcher"
-obj.version = "3.3.0"
+obj.version = "3.5.0"
 
 -- Load ISS native Lua C module
 local issLoader = package.loadlib(os.getenv("HOME") .. "/.local/lib/iss.so", "luaopen_iss")
@@ -90,7 +90,17 @@ end
 
 function switchToSpace(self, index)
    self._lastApp = hs.application.frontmostApplication()
-   if iss.switchToIndex(index - 1) then
+   -- macOS 27 (Golden Gate) blocks synthetic dock-swipe gestures, so
+   -- iss.switchToIndex no longer works. Switch via SkyLight transaction
+   -- (instant, no animation); fall back to hs.spaces.gotoSpace (animated)
+   -- if the private API is unavailable.
+   if iss.switchToIndexInstant(index - 1) then
+      updateMenuBar(self, index)
+      return
+   end
+   local spaceIDs = hs.spaces.spacesForScreen(hs.screen.mainScreen())
+   local targetID = spaceIDs and spaceIDs[index]
+   if targetID and hs.spaces.gotoSpace(targetID) then
       updateMenuBar(self, index)
    end
 end

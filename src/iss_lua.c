@@ -9,6 +9,12 @@ static int l_switch_to_index(lua_State *L) {
     return 1;
 }
 
+static int l_switch_to_index_instant(lua_State *L) {
+    unsigned int index = (unsigned int)luaL_checkinteger(L, 1);
+    lua_pushboolean(L, iss_switch_to_index_instant(index));
+    return 1;
+}
+
 static int l_get_space_info(lua_State *L) {
     ISSSpaceInfo info;
     if (iss_get_menubar_space_info(&info)) {
@@ -25,6 +31,7 @@ static int l_get_space_info(lua_State *L) {
 
 static const struct luaL_Reg isslib[] = {
     {"switchToIndex", l_switch_to_index},
+    {"switchToIndexInstant", l_switch_to_index_instant},
     {"getSpaceInfo", l_get_space_info},
     {NULL, NULL}
 };

@@ -54,6 +54,12 @@ extern CFStringRef CGSCopyActiveMenuBarDisplayIdentifier(CGSConnectionID connect
 extern CGSConnectionID CGSMainConnectionID(void) __attribute__((weak_import));
 extern CGSSpaceID CGSGetActiveSpace(CGSConnectionID connection) __attribute__((weak_import));
 
+// SkyLight transaction API — survives macOS 27 (Golden Gate), which blocks
+// synthetic dock-swipe gestures. Same mechanism newer yabai uses.
+extern CFTypeRef SLSTransactionCreate(CGSConnectionID connection) __attribute__((weak_import));
+extern void SLSTransactionSetManagedDisplayCurrentSpace(CFTypeRef transaction, CFStringRef display, CGSSpaceID space) __attribute__((weak_import));
+extern CFErrorRef SLSTransactionCommit(CFTypeRef transaction, int synchronous) __attribute__((weak_import));
+
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
@@ -343,6 +349,128 @@ bool iss_get_menubar_space_info(ISSSpaceInfo *info) {
 
     memset(info, 0, sizeof(*info));
     return load_space_info_for_display(info, false);
+}
+
+bool iss_switch_to_index_instant(unsigned int targetIndex) {
+    if (!cgs_symbols_available() ||
+        (&SLSTransactionCreate == NULL) ||
+        (&SLSTransactionSetManagedDisplayCurrentSpace == NULL) ||
+        (&SLSTransactionCommit == NULL)) {
+        fprintf(stderr, "ISS: SLSTransaction symbols missing\n");
+        return false;
+    }
+
+    CGSConnectionID connection = CGSMainConnectionID();
+    if (connection == 0) {
+        return false;
+    }
+
+    // Identify the display under the cursor (same policy as iss_get_space_info)
+    CFStringRef cursorIdent = NULL;
+    CGEventRef tempEvent = CGEventCreate(NULL);
+    if (tempEvent) {
+        CGPoint cursorLocation = CGEventGetLocation(tempEvent);
+        CFRelease(tempEvent);
+        CGDirectDisplayID cursorDisplay = 0;
+        uint32_t cursorDisplayCount = 0;
+        if (CGGetDisplaysWithPoint(cursorLocation, 1, &cursorDisplay, &cursorDisplayCount) == kCGErrorSuccess && cursorDisplayCount > 0) {
+            CFUUIDRef displayUUID = CGDisplayCreateUUIDFromDisplayID(cursorDisplay);
+            if (displayUUID) {
+                cursorIdent = CFUUIDCreateString(NULL, displayUUID);
+                CFRelease(displayUUID);
+            }
+        }
+    }
+
+    CFArrayRef displays = CGSCopyManagedDisplaySpaces(connection, NULL);
+    if (!displays) {
+        if (cursorIdent) CFRelease(cursorIdent);
+        return false;
+    }
+
+    // Pick the cursor display dict, falling back to the first one
+    CFDictionaryRef targetDisplay = NULL;
+    CFDictionaryRef fallbackDisplay = NULL;
+    const CFIndex displayCount = CFArrayGetCount(displays);
+    for (CFIndex i = 0; i < displayCount; i++) {
+        const void *displayValue = CFArrayGetValueAtIndex(displays, i);
+        if (!displayValue || CFGetTypeID(displayValue) != CFDictionaryGetTypeID()) {
+            continue;
+        }
+        CFDictionaryRef displayDict = (CFDictionaryRef)displayValue;
+        if (!fallbackDisplay) {
+            fallbackDisplay = displayDict;
+        }
+        CFStringRef identifier = (CFStringRef)CFDictionaryGetValue(displayDict, CFSTR("Display Identifier"));
+        if (cursorIdent && identifier && CFGetTypeID(identifier) == CFStringGetTypeID() && CFEqual(identifier, cursorIdent)) {
+            targetDisplay = displayDict;
+            break;
+        }
+    }
+    if (!targetDisplay) {
+        targetDisplay = fallbackDisplay;
+    }
+    if (cursorIdent) {
+        CFRelease(cursorIdent);
+        cursorIdent = NULL;
+    }
+    if (!targetDisplay) {
+        CFRelease(displays);
+        return false;
+    }
+
+    CFStringRef displayIdent = (CFStringRef)CFDictionaryGetValue(targetDisplay, CFSTR("Display Identifier"));
+    const void *spacesValue = CFDictionaryGetValue(targetDisplay, CFSTR("Spaces"));
+    if (!displayIdent || !spacesValue || CFGetTypeID(spacesValue) != CFArrayGetTypeID()) {
+        CFRelease(displays);
+        return false;
+    }
+
+    // Collect space IDs in order
+    CFArrayRef spaces = (CFArrayRef)spacesValue;
+    const CFIndex spaceCount = CFArrayGetCount(spaces);
+    CGSSpaceID ids[64];
+    unsigned int total = 0;
+    for (CFIndex i = 0; i < spaceCount && total < 64; i++) {
+        const void *spaceValue = CFArrayGetValueAtIndex(spaces, i);
+        if (!spaceValue || CFGetTypeID(spaceValue) != CFDictionaryGetTypeID()) {
+            continue;
+        }
+        CFNumberRef idNumber = (CFNumberRef)CFDictionaryGetValue((CFDictionaryRef)spaceValue, CFSTR("id64"));
+        if (!idNumber || CFGetTypeID(idNumber) != CFNumberGetTypeID()) {
+            continue;
+        }
+        CGSSpaceID candidate = 0;
+        if (CFNumberGetValue(idNumber, kCFNumberSInt64Type, &candidate)) {
+            ids[total++] = candidate;
+        }
+    }
+
+    if (total == 0 || targetIndex >= total) {
+        CFRelease(displays);
+        return false;
+    }
+
+    CGSSpaceID targetSpace = ids[targetIndex];
+    if (&CGSGetActiveSpace != NULL && CGSGetActiveSpace(connection) == targetSpace) {
+        CFRelease(displays);
+        return true;
+    }
+
+    CFTypeRef txn = SLSTransactionCreate(connection);
+    if (!txn) {
+        CFRelease(displays);
+        return false;
+    }
+    SLSTransactionSetManagedDisplayCurrentSpace(txn, displayIdent, targetSpace);
+    // Return value is unreliable (non-NULL even on success) — verify via
+    // CGSGetActiveSpace instead.
+    SLSTransactionCommit(txn, 1);
+    CFRelease(txn);
+
+    bool switched = (&CGSGetActiveSpace != NULL) && (CGSGetActiveSpace(connection) == targetSpace);
+    CFRelease(displays);
+    return switched;
 }
 
 bool iss_switch_to_index(unsigned int targetIndex) {

@@ -31,4 +31,14 @@ bool iss_get_menubar_space_info(ISSSpaceInfo *info);
  */
 bool iss_switch_to_index(unsigned int targetIndex);
 
+/**
+ * @brief Switches directly to the provided space index using a SkyLight
+ *        transaction (SLSTransactionSetManagedDisplayCurrentSpace).
+ *        No Dock gesture, no animation. Works on macOS 27 (Golden Gate),
+ *        where synthetic dock-swipe gestures are blocked.
+ * @param targetIndex Zero-based index for the desired space.
+ * @return true if the switch was committed (or already on target)
+ */
+bool iss_switch_to_index_instant(unsigned int targetIndex);
+
 #endif /* ISS_h */
