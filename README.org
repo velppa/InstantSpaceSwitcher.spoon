@@ -14,21 +14,25 @@ number as a pastel-colored circle in the menu bar.  Built on top of
 The switching happens in three layers:
 
 *** Layer 1: Hammerspoon hotkey → Lua (=init.lua=)
+=Option-5= → =switchToSpace(self, 5)=, which branches by macOS version:
+- macOS 27 (Golden Gate): =iss.switchToIndexAug(4)= (augmented gesture)
+- macOS ≤ 26: =iss.switchToIndex(4)= (legacy gesture)
 
-=Option-5= → =switchToSpace(self, 5)= → =iss.switchToIndex(4)= (0-indexed)
+Both are 0-indexed.  If the gesture path returns false it falls back to
+=hs.spaces.gotoSpace= (animated).
 
 *** Layer 2: Lua C binding (=src/iss_lua.c=)
-
 Thin wrapper that exposes ISS C functions to Lua via =package.loadlib=.
 No switching logic here — just marshals arguments and calls into ISS.
 
-| Lua function        | C function                  | Purpose                     |
-|---------------------+-----------------------------+-----------------------------|
-| =iss.switchToIndex= | =iss_switch_to_index()=     | Switch to space N           |
-| =iss.getSpaceInfo=  | =iss_get_menubar_space_info()= | Get current space + count |
+| Lua function             | C function                     | Purpose                              |
+|--------------------------+--------------------------------+--------------------------------------|
+| =iss.switchToIndex=        | =iss_switch_to_index()=          | Switch to space N (legacy gesture)   |
+| =iss.switchToIndexAug=     | =iss_switch_to_index_aug()=      | Switch to space N (macOS 27 gesture) |
+| =iss.switchToIndexInstant= | =iss_switch_to_index_instant()=  | Switch via SkyLight transaction      |
+| =iss.getSpaceInfo=         | =iss_get_menubar_space_info()=   | Get current space + count            |
 
 *** Layer 3: ISS C library (upstream =ISS.c=)
-
 =iss_switch_to_index(targetIndex)= does the actual work:
 
 1. *Query current state*: calls =CGSCopyManagedDisplaySpaces()= and
@@ -60,6 +64,21 @@ No switching logic here — just marshals arguments and calls into ISS.
    to complete the space transition instantly, skipping the swipe
    animation entirely.
 
+*** macOS 27 (Golden Gate) — augmented gesture
+macOS 27 ignores gesture data set via the public =CGEvent= field API,
+so the legacy dock-swipe above is silently dropped.
+=iss_switch_to_index_aug()= embeds the gesture data in the hidden
+=IOHID= struct the system actually reads.  It stays Dock-driven, so it
+is instant with a clean menu bar and switches empty spaces too.
+
+Far jumps pipeline a fast gesture burst (~5ms/space, ~50ms for 2→10),
+with a feedback top-up for any dropped step.
+
+Two other macOS 27 approaches were dead ends:
+- =iss_switch_to_index_instant()= (SkyLight =SLSTransactionSetManagedDisplayCurrentSpace=):
+  switches, but desyncs WindowServer and corrupts the menu bar.
+- =hs.spaces.gotoSpace=: no-op on 27.
+
 ** Menu bar indicator
 A colored circle with the space number, rendered via =hs.canvas= into
 =hs.menubar=.  Ten pastel colors (red through gray) map to spaces
@@ -80,7 +99,8 @@ swipe or Mission Control.
 | =src/frontmost-window.swift= | CLI: print focused window title (AXFocusedWindow)   |
 
 ** Prerequisites
-- macOS (tested on Sequoia 15.x)
+- macOS (tested on Sequoia 15.x; macOS 27 Golden Gate supported via
+  the augmented gesture path)
 - [[https://www.hammerspoon.org/][Hammerspoon.app]] installed in =/Applications=
 - Xcode Command Line Tools (=xcode-select --install=)
 - Accessibility permissions for Hammerspoon (System Settings →
@@ -138,8 +158,9 @@ to space 3 instantly.
 - *Sequential stepping*: switching from space 1 to space 10 posts 9
   consecutive gesture events.  In practice this is still instant, but
   there may be edge cases with very high space counts.
-- *macOS updates*: relies on undocumented =CGS*= private APIs and
-  synthetic gesture event fields.  May break with macOS updates.
+- *macOS updates*: relies on undocumented =CGS*=/=SLS*= private APIs
+  and synthetic gesture event fields (legacy =CGEvent= fields ≤ 26,
+  hidden =IOHID= struct on 27).  May break with macOS updates.
 * 2. frontmost-window
 Standalone Swift CLI that prints the title of an app's most recently
 focused window using the Accessibility API
