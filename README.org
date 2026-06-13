@@ -158,7 +158,7 @@ to space 3 instantly.
 - *Sequential stepping*: switching from space 1 to space 10 posts 9
   consecutive gesture events.  In practice this is still instant, but
   there may be edge cases with very high space counts.
-- *macOS updates*: relies on undocumented =CGS*=/=SLS*= private APIs
+- *macOS updates*: relies on undocumented =CGS*/SLS*= private APIs
   and synthetic gesture event fields (legacy =CGEvent= fields ≤ 26,
   hidden =IOHID= struct on 27).  May break with macOS updates.
 * 2. frontmost-window
