@@ -8,7 +8,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "InstantSpaceSwitcher"
-obj.version = "3.5.0"
+obj.version = "3.8.1"
 
 -- Load ISS native Lua C module
 local issLoader = package.loadlib(os.getenv("HOME") .. "/.local/lib/iss.so", "luaopen_iss")
@@ -88,19 +88,40 @@ local function refreshMenuBar(self)
    end
 end
 
+-- macOS 27 (Golden Gate) ignores the public CGEvent gesture fields, so the
+-- legacy synthetic dock-swipe (iss.switchToIndex) is silently dropped. The
+-- working method is the *augmented* gesture (iss.switchToIndexAug): it embeds
+-- the gesture data in the hidden IOHID struct the system actually reads. It is
+-- Dock-driven, so it's instant with a clean menu bar and switches empty spaces
+-- — unlike the SkyLight transaction (corrupts the menu bar) and
+-- hs.spaces.gotoSpace (no-op on 27), both dead ends here.
+local isGoldenGate = hs.host.operatingSystemVersion().major >= 27
+
+local function gotoSpaceByIndex(index)
+   local spaceIDs = hs.spaces.spacesForScreen(hs.screen.mainScreen())
+   local targetID = spaceIDs and spaceIDs[index]
+   return targetID and hs.spaces.gotoSpace(targetID)
+end
+
 function switchToSpace(self, index)
    self._lastApp = hs.application.frontmostApplication()
-   -- macOS 27 (Golden Gate) blocks synthetic dock-swipe gestures, so
-   -- iss.switchToIndex no longer works. Switch via SkyLight transaction
-   -- (instant, no animation); fall back to hs.spaces.gotoSpace (animated)
-   -- if the private API is unavailable.
-   if iss.switchToIndexInstant(index - 1) then
+   -- macOS 27: augmented dock-swipe gesture (instant, clean menu bar). Far jumps
+   -- pipeline a fast gesture burst in iss.so (~5ms/space, ~50ms for 2→10), with
+   -- a feedback top-up for any dropped step. The SLS transaction was a dead end
+   -- (mangles the menu bar / desyncs Dock — see notes).
+   -- macOS <= 26: legacy dock-swipe.
+   local switched
+   if isGoldenGate then
+      switched = iss.switchToIndexAug(index - 1)
+   else
+      switched = iss.switchToIndex(index - 1)
+   end
+   if switched then
       updateMenuBar(self, index)
       return
    end
-   local spaceIDs = hs.spaces.spacesForScreen(hs.screen.mainScreen())
-   local targetID = spaceIDs and spaceIDs[index]
-   if targetID and hs.spaces.gotoSpace(targetID) then
+   -- Fall back to hs.spaces.gotoSpace (animated).
+   if gotoSpaceByIndex(index) then
       updateMenuBar(self, index)
    end
 end
@@ -232,7 +253,9 @@ function obj:start()
    self._menubar = hs.menubar.new()
    self._menubar:setMenu(function() return buildMenu(self) end)
 
-   -- Hotkeys
+   -- Hotkeys: Option-1..0 switch to spaces 1..10. Both OS paths are synthetic
+   -- dock-swipe gestures (GG = augmented; ≤26 = legacy). The native "Switch to
+   -- Desktop N" shortcuts must stay UNBOUND from ⌥N or they'd fight these.
    local keys = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}
    self._hotkeys = {}
    for i, key in ipairs(keys) do

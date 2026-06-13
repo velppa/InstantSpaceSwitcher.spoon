@@ -4,8 +4,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CGEventTypes.h>
 #include <float.h>
+#include <mach/mach_time.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -59,6 +61,10 @@ extern CGSSpaceID CGSGetActiveSpace(CGSConnectionID connection) __attribute__((w
 extern CFTypeRef SLSTransactionCreate(CGSConnectionID connection) __attribute__((weak_import));
 extern void SLSTransactionSetManagedDisplayCurrentSpace(CFTypeRef transaction, CFStringRef display, CGSSpaceID space) __attribute__((weak_import));
 extern CFErrorRef SLSTransactionCommit(CFTypeRef transaction, int synchronous) __attribute__((weak_import));
+// Promotes the active/front process to match the space we just switched to.
+// Without it, the SLS switch leaves the front process stale and the menu bar
+// composites multiple spaces' menus. Returns a CGError (0 = success).
+extern int SLSEnsureSpaceSwitchToActiveProcess(CGSConnectionID connection) __attribute__((weak_import));
 
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
@@ -67,6 +73,171 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
 static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
 static bool iss_post_switch_gesture(ISSDirection direction);
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction);
+static bool iss_post_switch_gesture_aug(ISSDirection direction);
+
+// --- macOS 27 (Golden Gate) augmented dock-swipe gesture ---
+//
+// On macOS 27 the gesture data the system actually reads no longer comes from
+// the public CGEvent fields; it lives in a hidden IOHID queue-element struct
+// embedded in the *serialized* CGEvent as field 4205. Synthetic gestures built
+// only with CGEventSetIntegerValueField are silently dropped. To switch:
+// build the dock-control event, serialize with CGEventCreateData, append the
+// IOHID blob as field 4205, rebuild with CGEventCreateFromData, then post.
+// Technique credit: mgbowen/FasterSwiper (macos27 branch).
+//
+// Floats in the hidden struct are signed 16.16 fixed-point. Direction is
+// inverted vs the legacy path: increasing the space index needs *negative*
+// progress/velocity (determined empirically on 27.0).
+
+static const CGEventField kCGEventGestureSwipePositionX = (CGEventField)125;
+static const CGEventField kCGEventGestureSwipePositionY = (CGEventField)126;
+
+static const uint32_t kISSHIDEventTypeVelocity = 9;
+static const uint32_t kISSHIDEventTypeFluidTouch = 23;
+static const uint16_t kISSHIDGestureFlavorDockPrimary = 3;
+
+typedef int32_t ISSFixed1616;
+
+#pragma pack(push, 1)
+typedef struct {
+    uint64_t timestamp;
+    uint64_t sender_id;
+    uint32_t options;
+    uint32_t attribute_length;
+    uint32_t event_count;
+} ISSHIDQueueElement;
+typedef struct {
+    uint32_t size;
+    uint32_t type;
+    uint32_t options;
+    uint8_t depth;
+    uint8_t reserved[3];
+} ISSHIDEventBase;
+typedef struct {
+    ISSHIDEventBase base;
+    ISSFixed1616 position_x, position_y, position_z;
+    uint32_t swipe_mask;
+    uint16_t gesture_motion, gesture_flavor;
+    ISSFixed1616 swipe_progress;
+} ISSHIDFluidTouch;
+typedef struct {
+    ISSHIDEventBase base;
+    ISSFixed1616 velocity_x, velocity_y, velocity_z;
+} ISSHIDVelocity;
+#pragma pack(pop)
+
+static ISSFixed1616 iss_to_fixed1616(double value) {
+    ISSFixed1616 fixed = (ISSFixed1616)(value * 65536.0);
+    if (fixed == 0 && value != 0.0) {
+        fixed = value > 0 ? 1 : -1;  // avoid truncating tiny magnitudes to 0
+    }
+    return fixed;
+}
+
+static void iss_put_be16(uint8_t **cursor, uint16_t value) {
+    (*cursor)[0] = (uint8_t)(value >> 8);
+    (*cursor)[1] = (uint8_t)(value & 0xFF);
+    *cursor += 2;
+}
+
+static bool iss_post_augmented_gesture(int phase, double progress, double velocityX) {
+    CGEventRef ev = CGEventCreate(NULL);
+    if (!ev) {
+        return false;
+    }
+    CGEventSetIntegerValueField(ev, kCGSEventTypeField, kCGSEventDockControl);
+    CGEventSetIntegerValueField(ev, kCGEventGestureHIDType, kIOHIDEventTypeDockSwipe);
+    CGEventSetIntegerValueField(ev, kCGEventGesturePhase, phase);
+    CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, kCGGestureMotionHorizontal);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeProgress, progress);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, velocityX);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, 0);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipePositionX, 0);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipePositionY, 0);
+
+    // Build the hidden IOHID queue element: header + fluid-touch (+ velocity).
+    uint8_t blob[sizeof(ISSHIDQueueElement) + sizeof(ISSHIDFluidTouch) + sizeof(ISSHIDVelocity)];
+    uint8_t *write = blob + sizeof(ISSHIDQueueElement);
+    bool hasVelocity = (velocityX != 0.0) || (phase == (int)kCGSGesturePhaseEnded);
+
+    ISSHIDFluidTouch fluid;
+    memset(&fluid, 0, sizeof fluid);
+    fluid.base.size = sizeof(ISSHIDFluidTouch);
+    fluid.base.type = kISSHIDEventTypeFluidTouch;
+    fluid.base.options = (uint32_t)((phase & 0xFF) << 24);
+    fluid.gesture_motion = (uint16_t)kCGGestureMotionHorizontal;
+    fluid.gesture_flavor = kISSHIDGestureFlavorDockPrimary;
+    fluid.swipe_progress = iss_to_fixed1616(progress);
+    memcpy(write, &fluid, sizeof fluid);
+    write += sizeof fluid;
+
+    if (hasVelocity) {
+        ISSHIDVelocity vel;
+        memset(&vel, 0, sizeof vel);
+        vel.base.size = sizeof(ISSHIDVelocity);
+        vel.base.type = kISSHIDEventTypeVelocity;
+        vel.base.depth = 1;
+        vel.velocity_x = iss_to_fixed1616(velocityX);
+        memcpy(write, &vel, sizeof vel);
+        write += sizeof vel;
+    }
+
+    ISSHIDQueueElement header;
+    memset(&header, 0, sizeof header);
+    header.timestamp = mach_absolute_time();
+    header.event_count = hasVelocity ? 2 : 1;
+    memcpy(blob, &header, sizeof header);
+    size_t blobLen = (size_t)(write - blob);
+
+    CFDataRef data = CGEventCreateData(NULL, ev);
+    CFRelease(ev);
+    if (!data) {
+        return false;
+    }
+    const uint8_t *src = CFDataGetBytePtr(data);
+    CFIndex srcLen = CFDataGetLength(data);
+
+    // Append field 4205 (binary blob): [be16 byteLen][be16 tag<<14|field][bytes].
+    // tag 0b00 with size > 1 = binary blob; the deserializer is order-agnostic
+    // so appending to the end is sufficient (no full re-serialize needed).
+    size_t newLen = (size_t)srcLen + 4 + blobLen;
+    uint8_t *buf = malloc(newLen);
+    if (!buf) {
+        CFRelease(data);
+        return false;
+    }
+    memcpy(buf, src, srcLen);
+    uint8_t *cursor = buf + srcLen;
+    iss_put_be16(&cursor, (uint16_t)blobLen);
+    iss_put_be16(&cursor, (uint16_t)4205);
+    memcpy(cursor, blob, blobLen);
+    CFRelease(data);
+
+    CFDataRef newData = CFDataCreate(NULL, buf, newLen);
+    free(buf);
+    if (!newData) {
+        return false;
+    }
+    CGEventRef augmented = CGEventCreateFromData(NULL, newData);
+    CFRelease(newData);
+    if (!augmented) {
+        return false;
+    }
+    CGEventPost(kCGSessionEventTap, augmented);
+    CFRelease(augmented);
+    return true;
+}
+
+static bool iss_post_switch_gesture_aug(ISSDirection direction) {
+    bool increase = (direction == ISSDirectionRight);
+    double progress = increase ? -1.0 : 1.0;
+    double velocity = increase ? -400.0 : 400.0;
+    if (!iss_post_augmented_gesture((int)kCGSGesturePhaseBegan, 0.0, 0.0)) {
+        return false;
+    }
+    usleep(3000);
+    return iss_post_augmented_gesture((int)kCGSGesturePhaseEnded, progress, velocity);
+}
 
 static bool cgs_symbols_available(void) {
     return (&CGSMainConnectionID != NULL) &&
@@ -468,6 +639,12 @@ bool iss_switch_to_index_instant(unsigned int targetIndex) {
     SLSTransactionCommit(txn, 1);
     CFRelease(txn);
 
+    // Fix the menu-bar mangle: promote the front process to the new space so
+    // the menu bar repaints for the right app instead of compositing stale menus.
+    if (&SLSEnsureSpaceSwitchToActiveProcess != NULL) {
+        SLSEnsureSpaceSwitchToActiveProcess(connection);
+    }
+
     bool switched = (&CGSGetActiveSpace != NULL) && (CGSGetActiveSpace(connection) == targetSpace);
     CFRelease(displays);
     return switched;
@@ -501,5 +678,46 @@ bool iss_switch_to_index(unsigned int targetIndex) {
         }
     }
 
+    return !outOfBounds;
+}
+
+bool iss_switch_to_index_aug(unsigned int targetIndex) {
+    ISSSpaceInfo info;
+    if (!iss_get_space_info(&info)) {
+        return false;
+    }
+    if (info.spaceCount == 0) {
+        return false;
+    }
+
+    bool outOfBounds = targetIndex >= info.spaceCount;
+    if (outOfBounds) {
+        targetIndex = info.spaceCount - 1;
+    }
+
+    // Each gesture moves exactly one space, so a far jump steps through the
+    // spaces in between (inherent to the Dock-driven path; teleport via the SLS
+    // transaction mangles the menu bar — dead end, see notes). The Dock pipelines
+    // gestures posted in quick succession WITHOUT waiting for each to commit, so
+    // a fast fixed-delay BURST — post exactly N gestures, ~2 ms apart, no waiting
+    // — covers the distance in ~5 ms/space (~50 ms for 2↔10, ~5× faster than
+    // waiting for each commit). Measured 6/6 exact in BOTH directions at 1–6 ms
+    // spacing, so no feedback correction is needed: the burst posts exactly the
+    // step count and never overshoots. (An earlier feedback top-up was REMOVED —
+    // it raced the gesture commit and double-posted, causing the bounce/flash and
+    // off-by-one landings, especially leftward near the low edge.)
+    ISSDirection direction = info.currentIndex < targetIndex ? ISSDirectionRight : ISSDirectionLeft;
+    unsigned int steps = direction == ISSDirectionRight
+        ? (targetIndex - info.currentIndex)
+        : (info.currentIndex - targetIndex);
+    const unsigned int BURST_STEP_US = 2000;   // inter-gesture delay in the burst
+    for (unsigned int i = 0; i < steps; i++) {
+        if (!iss_post_switch_gesture_aug(direction)) {
+            return false;
+        }
+        if (i + 1 < steps) {
+            usleep(BURST_STEP_US);
+        }
+    }
     return !outOfBounds;
 }

@@ -38,7 +38,21 @@ bool iss_switch_to_index(unsigned int targetIndex);
  *        where synthetic dock-swipe gestures are blocked.
  * @param targetIndex Zero-based index for the desired space.
  * @return true if the switch was committed (or already on target)
+ * @note On macOS 27 this desyncs WindowServer's space state (corrupts the
+ *       menu bar). Prefer iss_switch_to_index_aug there.
  */
 bool iss_switch_to_index_instant(unsigned int targetIndex);
+
+/**
+ * @brief Switches to the provided space index by posting augmented synthetic
+ *        dock-swipe gestures — the only Dock-driven method that still works on
+ *        macOS 27 (Golden Gate), which ignores gesture data set via the public
+ *        CGEvent field API and reads it from a hidden IOHID struct embedded in
+ *        the serialized event instead. Instant, Dock-driven (clean menu bar,
+ *        empty spaces switch), no WindowServer desync.
+ * @param targetIndex Zero-based index for the desired space.
+ * @return true on success (or already on target)
+ */
+bool iss_switch_to_index_aug(unsigned int targetIndex);
 
 #endif /* ISS_h */
