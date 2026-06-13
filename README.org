@@ -6,8 +6,7 @@ frontmost-window utility.
 
 * 1. InstantSpaceSwitcher.spoon
 
-[[iss-spoon.png]]
-
+[[doc/iss-spoon-1.png]] [[doc/iss-spoon-7.png]] [[doc/iss-spoon-8.png]]
 
 A [[https://www.hammerspoon.org/][Hammerspoon]] Spoon that switches macOS Spaces instantly (no
 animation) using =Option-1= through =Option-0=.  Shows the current space
