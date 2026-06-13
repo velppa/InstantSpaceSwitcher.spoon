@@ -5,6 +5,10 @@ This repo contains two things: InstantSpaceSwitcher.spoon and
 frontmost-window utility.
 
 * 1. InstantSpaceSwitcher.spoon
+
+[[iss-spoon.png]]
+
+
 A [[https://www.hammerspoon.org/][Hammerspoon]] Spoon that switches macOS Spaces instantly (no
 animation) using =Option-1= through =Option-0=.  Shows the current space
 number as a pastel-colored circle in the menu bar.  Built on top of
