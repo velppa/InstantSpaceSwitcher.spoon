@@ -8,7 +8,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "InstantSpaceSwitcher"
-obj.version = "3.8.1"
+obj.version = "3.9.0"
 
 -- Load ISS native Lua C module
 local issLoader = package.loadlib(os.getenv("HOME") .. "/.local/lib/iss.so", "luaopen_iss")
@@ -103,11 +103,34 @@ local function gotoSpaceByIndex(index)
    return targetID and hs.spaces.gotoSpace(targetID)
 end
 
+-- Give keyboard focus to the front window once the space switch has committed.
+--
+-- The Dock-swipe gesture makes the target space's app frontmost (clean menu
+-- bar) but leaves no window as the *key* window, so keystrokes go nowhere until
+-- a click makes one key. Re-focusing the front window posts the same
+-- front-process/raise calls a click would — this is the workaround yabai applies
+-- after a switch on Golden Gate. The v3.8.1 gesture burst returns before the
+-- Dock commits, so poll iss.getSpaceInfo until the target is actually current
+-- (bounded ~300ms) before focusing, or we'd key a window on the old space.
+local function focusFrontWindowAfterSwitch(index, attempts)
+   attempts = attempts or 0
+   local info = iss.getSpaceInfo()
+   if info and info.current == index then
+      local win = hs.window.frontmostWindow()
+      if win then win:focus() end
+   elseif attempts < 30 then
+      hs.timer.doAfter(0.01, function()
+         focusFrontWindowAfterSwitch(index, attempts + 1)
+      end)
+   end
+end
+
 function switchToSpace(self, index)
    self._lastApp = hs.application.frontmostApplication()
    -- macOS 27: augmented dock-swipe gesture (instant, clean menu bar). Far jumps
-   -- pipeline a fast gesture burst in iss.so (~5ms/space, ~50ms for 2→10), with
-   -- a feedback top-up for any dropped step. The SLS transaction was a dead end
+   -- pipeline a fast gesture burst in iss.so (~2ms apart, ~5ms/space, ~50ms for
+   -- 2→10); the Dock pipelines gestures without waiting for each to commit, so no
+   -- per-step feedback is needed. The SLS transaction was a dead end
    -- (mangles the menu bar / desyncs Dock — see notes).
    -- macOS <= 26: legacy dock-swipe.
    local switched
@@ -118,6 +141,9 @@ function switchToSpace(self, index)
    end
    if switched then
       updateMenuBar(self, index)
+      if isGoldenGate then
+         focusFrontWindowAfterSwitch(index)
+      end
       return
    end
    -- Fall back to hs.spaces.gotoSpace (animated).

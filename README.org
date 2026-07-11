@@ -74,8 +74,9 @@ so the legacy dock-swipe above is silently dropped.
 =IOHID= struct the system actually reads.  It stays Dock-driven, so it
 is instant with a clean menu bar and switches empty spaces too.
 
-Far jumps pipeline a fast gesture burst (~5ms/space, ~50ms for 2→10),
-with a feedback top-up for any dropped step.
+Far jumps pipeline a fast gesture burst (~2ms apart, ~5ms/space, ~50ms
+for 2→10): the Dock pipelines gestures posted in quick succession
+without waiting for each to commit, so no per-step feedback is needed.
 
 Two other macOS 27 approaches were dead ends:
 - =iss_switch_to_index_instant()= (SkyLight =SLSTransactionSetManagedDisplayCurrentSpace=):
