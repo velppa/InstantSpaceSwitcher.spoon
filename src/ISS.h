@@ -55,4 +55,15 @@ bool iss_switch_to_index_instant(unsigned int targetIndex);
  */
 bool iss_switch_to_index_aug(unsigned int targetIndex);
 
+/**
+ * @brief Gives keyboard focus to the window with the given CGWindowID by
+ *        making its owner the front process scoped to that window and posting
+ *        the make-key event records to it. Focuses exactly one window — no
+ *        app-level activation, so the app's windows on other displays are not
+ *        raised and the active display does not change.
+ * @param windowID CGWindowID of the window to focus.
+ * @return true if all calls succeeded
+ */
+bool iss_focus_window(unsigned int windowID);
+
 #endif /* ISS_h */

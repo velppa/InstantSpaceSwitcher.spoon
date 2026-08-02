@@ -8,7 +8,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "InstantSpaceSwitcher"
-obj.version = "3.9.0"
+obj.version = "3.10.0"
 
 -- Load ISS native Lua C module
 local issLoader = package.loadlib(os.getenv("HOME") .. "/.local/lib/iss.so", "luaopen_iss")
@@ -112,15 +112,55 @@ end
 -- after a switch on Golden Gate. The v3.8.1 gesture burst returns before the
 -- Dock commits, so poll iss.getSpaceInfo until the target is actually current
 -- (bounded ~300ms) before focusing, or we'd key a window on the old space.
-local function focusFrontWindowAfterSwitch(index, attempts)
+--
+-- Two-display rules: only a window on the display where the switch happened
+-- (the cursor display, iss_get_space_info policy) may receive focus, and
+-- keying it must not touch the other display. Both app-level paths break the
+-- second rule when the app also has a window on the other display — focus()
+-- and activate() raise that app's key window there, activating the other
+-- display and flipping the active menu bar. iss.focusWindow (SLPS, see ISS.c)
+-- keys exactly one window with no app activation, so the other display stays
+-- untouched.
+--
+-- The Dock's own post-gesture activation still races: it can key the app's
+-- other-display window ~tens of ms after the switch, and once the active
+-- display flips, iss.getSpaceInfo reports the wrong display — so after the
+-- commit is first observed the loop stops consulting it and just enforces:
+-- each tick, refocus the topmost cursor-screen window until focus has stayed
+-- there for 3 consecutive ticks (bounded ~400ms). An empty space yields no
+-- window and times out as a no-op.
+local function focusFrontWindowAfterSwitch(index, attempts, committed, stable)
    attempts = attempts or 0
-   local info = iss.getSpaceInfo()
-   if info and info.current == index then
-      local win = hs.window.frontmostWindow()
-      if win then win:focus() end
-   elseif attempts < 30 then
+   stable = stable or 0
+   local screen = hs.mouse.getCurrentScreen()
+   if not committed then
+      local info = iss.getSpaceInfo()
+      committed = info and info.current == index
+   end
+   if committed then
+      local focused = hs.window.focusedWindow()
+      if focused and focused:screen() == screen then
+         stable = stable + 1
+         if stable >= 3 then
+            return
+         end
+      else
+         stable = 0
+         local target
+         for _, win in ipairs(hs.window.orderedWindows()) do
+            if win:screen() == screen then
+               target = win
+               break
+            end
+         end
+         if target then
+            iss.focusWindow(target:id())
+         end
+      end
+   end
+   if attempts < 40 then
       hs.timer.doAfter(0.01, function()
-         focusFrontWindowAfterSwitch(index, attempts + 1)
+         focusFrontWindowAfterSwitch(index, attempts + 1, committed, stable)
       end)
    end
 end
@@ -152,6 +192,10 @@ function switchToSpace(self, index)
    end
 end
 
+--- Move the frontmost window to space `index` (1-10) without following it.
+--- Uses the SkyLight managed-space move (no drag, works off-target on Golden
+--- Gate). Returns true on success, false if there is no front window or the
+--- index has no space (e.g. an empty space with nothing to move).
 --- Open a new window of the app that was frontmost before the last space switch.
 --- Useful on empty spaces: switch to a new space, then call this to bring your app there.
 function obj:newWindowOfLastApp()

@@ -245,6 +245,72 @@ static bool cgs_symbols_available(void) {
            (&CGSCopyManagedDisplaySpaces != NULL);
 }
 
+// --- SLPS window focus (yabai's technique) ---
+//
+// Focuses one specific window: scope the front-process switch to the window id
+// and post the two "make key window" event records to the owning process.
+// Unlike app-level activation (SetFrontProcess / NSRunningApplication
+// activate), this never raises the app's other windows, so with two displays
+// the app's window on the other display stays put and that display is not
+// activated.
+
+typedef struct {
+    uint32_t hi;
+    uint32_t lo;
+} ISSProcessSerialNumber;
+
+static const uint32_t kISSCPSUserGenerated = 0x200;
+
+extern int SLSGetWindowOwner(CGSConnectionID cid, uint32_t wid, CGSConnectionID *owner) __attribute__((weak_import));
+extern int SLSGetConnectionPSN(CGSConnectionID cid, ISSProcessSerialNumber *psn) __attribute__((weak_import));
+extern int _SLPSSetFrontProcessWithOptions(ISSProcessSerialNumber *psn, uint32_t wid, uint32_t mode) __attribute__((weak_import));
+extern int SLPSPostEventRecordTo(ISSProcessSerialNumber *psn, uint8_t *bytes) __attribute__((weak_import));
+
+static void iss_make_key_window(ISSProcessSerialNumber *psn, uint32_t wid) {
+    uint8_t bytes[0xf8] = {0};
+    bytes[0x04] = 0xf8;
+    bytes[0x3a] = 0x10;
+    memcpy(bytes + 0x3c, &wid, sizeof(uint32_t));
+    memset(bytes + 0x20, 0xff, 0x10);
+
+    bytes[0x08] = 0x01;  // make-key activate record
+    SLPSPostEventRecordTo(psn, bytes);
+    bytes[0x08] = 0x02;  // demote previous key window
+    SLPSPostEventRecordTo(psn, bytes);
+}
+
+bool iss_focus_window(unsigned int windowID) {
+    if ((&CGSMainConnectionID == NULL) ||
+        (&SLSGetWindowOwner == NULL) ||
+        (&SLSGetConnectionPSN == NULL) ||
+        (&_SLPSSetFrontProcessWithOptions == NULL) ||
+        (&SLPSPostEventRecordTo == NULL)) {
+        fprintf(stderr, "ISS: SLPS focus symbols missing\n");
+        return false;
+    }
+
+    CGSConnectionID connection = CGSMainConnectionID();
+    if (connection == 0) {
+        return false;
+    }
+
+    CGSConnectionID owner = 0;
+    if (SLSGetWindowOwner(connection, (uint32_t)windowID, &owner) != 0 || owner == 0) {
+        return false;
+    }
+
+    ISSProcessSerialNumber psn = {0, 0};
+    if (SLSGetConnectionPSN(owner, &psn) != 0) {
+        return false;
+    }
+
+    if (_SLPSSetFrontProcessWithOptions(&psn, (uint32_t)windowID, kISSCPSUserGenerated) != 0) {
+        return false;
+    }
+    iss_make_key_window(&psn, (uint32_t)windowID);
+    return true;
+}
+
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
