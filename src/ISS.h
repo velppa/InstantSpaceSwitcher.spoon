@@ -68,11 +68,18 @@ bool iss_focus_window(unsigned int windowID);
 
 /**
  * @brief Clears the cached predicted space index so the next switch/query
- *        falls back to a live CGS read.
+ *        falls back to a live CGS read; ignored while gestures are in flight.
  * @note Call this whenever the active space changes by a means other than
  *       iss_switch_to_index()/iss_switch_to_index_aug() (e.g. a trackpad
  *       swipe or Mission Control), so a stale prediction can't linger.
  */
 void iss_reset_predictions(void);
+
+/**
+ * @brief Whether gestures posted by this library may still be animating.
+ * @note Space-change notifications seen while this is true come from those
+ *       gestures' intermediate hops.
+ */
+bool iss_gestures_in_flight(void);
 
 #endif /* ISS_h */

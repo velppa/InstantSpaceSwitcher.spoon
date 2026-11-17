@@ -8,7 +8,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "InstantSpaceSwitcher"
-obj.version = "3.10.0"
+obj.version = "3.11.0"
 
 -- Load ISS native Lua C module
 local issLoader = package.loadlib(os.getenv("HOME") .. "/.local/lib/iss.so", "luaopen_iss")
@@ -108,6 +108,29 @@ local function gotoSpaceByIndex(index)
    return targetID and hs.spaces.gotoSpace(targetID)
 end
 
+local function gesturesInFlight()
+   return iss.gesturesInFlight ~= nil and iss.gesturesInFlight()
+end
+
+-- Keep the user on an empty space they just switched to.
+--
+-- Landing on a space with no windows makes macOS activate the most recently
+-- used app; that app orders in its window from another space and the Dock
+-- follows it ~400 ms later. Activating windowless Hammerspoon instead leaves
+-- nothing to follow. Skipped while a Hammerspoon window exists, which would
+-- itself be followed. Emptiness comes from the window server's on-screen list:
+-- the accessibility window list misses windows on macOS 27. A window on any
+-- display counts, so with two displays the hold rarely applies.
+local function holdEmptySpace()
+   if #hs.window._orderedwinids() > 0 then
+      return
+   end
+   if #hs.application.applicationForPID(hs.processInfo.processID):allWindows() > 0 then
+      return
+   end
+   hs.focus()
+end
+
 -- Give keyboard focus to the front window once the space switch has committed.
 --
 -- The Dock-swipe gesture makes the target space's app frontmost (clean menu
@@ -133,7 +156,7 @@ end
 -- commit is first observed the loop stops consulting it and just enforces:
 -- each tick, refocus the topmost cursor-screen window until focus has stayed
 -- there for 3 consecutive ticks (bounded ~400ms). An empty space yields no
--- window and times out as a no-op.
+-- window: it is held instead (holdEmptySpace) and the loop times out.
 local function focusFrontWindowAfterSwitch(index, attempts, committed, stable)
    attempts = attempts or 0
    stable = stable or 0
@@ -141,6 +164,9 @@ local function focusFrontWindowAfterSwitch(index, attempts, committed, stable)
    if not committed then
       local info = iss.getSpaceInfo()
       committed = info and info.current == index
+      if committed then
+         holdEmptySpace()
+      end
    end
    if committed then
       local focused = hs.window.focusedWindow()
@@ -173,11 +199,13 @@ end
 function switchToSpace(self, index)
    self._lastApp = hs.application.frontmostApplication()
    -- macOS 27: augmented dock-swipe gesture (instant, clean menu bar). Far jumps
-   -- pipeline a fast gesture burst in iss.so (~2ms apart, ~5ms/space, ~50ms for
-   -- 2→10); the Dock pipelines gestures without waiting for each to commit, so no
-   -- per-step feedback is needed. The SLS transaction was a dead end
+   -- are a gesture burst in iss.so; the Dock pipelines gestures without waiting
+   -- for each to commit, so no per-step feedback is needed. The SLS transaction was a dead end
    -- (mangles the menu bar / desyncs Dock — see notes).
    -- macOS <= 26: legacy dock-swipe.
+   -- The icon shows the target at once; the switch lands after the burst.
+   local shownBefore = self._lastShownIndex
+   updateMenuBar(self, index)
    local switched
    if isGoldenGate then
       switched = iss.switchToIndexAug(index - 1)
@@ -185,15 +213,16 @@ function switchToSpace(self, index)
       switched = iss.switchToIndex(index - 1)
    end
    if switched then
-      updateMenuBar(self, index)
       if isGoldenGate then
          focusFrontWindowAfterSwitch(index)
       end
+      -- Correct the icon if the landing differs from the target.
+      hs.timer.doAfter(1.1, function() refreshMenuBar(self) end)
       return
    end
    -- Fall back to hs.spaces.gotoSpace (animated).
-   if gotoSpaceByIndex(index) then
-      updateMenuBar(self, index)
+   if not gotoSpaceByIndex(index) and shownBefore then
+      updateMenuBar(self, shownBefore)
    end
 end
 
@@ -342,11 +371,15 @@ function obj:start()
    end
 
    -- Watch for space changes (swipe, Mission Control, etc.). These bypass
-   -- switchToSpace, so the C library's predicted index (set only by
-   -- iss.switchToIndex/switchToIndexAug) would otherwise go stale.
+   -- switchToSpace, so the C library's predicted index would otherwise go
+   -- stale. Changes while this spoon's own gestures are in flight are their
+   -- intermediate hops; switchToSpace handles the landing and the icon.
    self._spaceWatcher = hs.spaces.watcher.new(function()
       iss.resetPredictions()
-      refreshMenuBar(self)
+      if not gesturesInFlight() then
+         refreshMenuBar(self)
+         holdEmptySpace()
+      end
    end)
    self._spaceWatcher:start()
 

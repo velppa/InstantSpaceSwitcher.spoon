@@ -33,6 +33,11 @@ static int l_reset_predictions(lua_State *L) {
     return 0;
 }
 
+static int l_gestures_in_flight(lua_State *L) {
+    lua_pushboolean(L, iss_gestures_in_flight());
+    return 1;
+}
+
 static int l_get_space_info(lua_State *L) {
     ISSSpaceInfo info;
     if (iss_get_menubar_space_info(&info)) {
@@ -54,6 +59,7 @@ static const struct luaL_Reg isslib[] = {
     {"getSpaceInfo", l_get_space_info},
     {"focusWindow", l_focus_window},
     {"resetPredictions", l_reset_predictions},
+    {"gesturesInFlight", l_gestures_in_flight},
     {NULL, NULL}
 };
 

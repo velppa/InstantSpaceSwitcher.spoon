@@ -73,18 +73,42 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
 static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
 static bool iss_post_switch_gesture(ISSDirection direction);
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction);
-static bool iss_post_switch_gesture_aug(ISSDirection direction, double velocity);
+static bool iss_post_switch_gesture_aug(ISSDirection direction);
 
-// Single-display-only prediction cache (see README "Single display only"
-// limitation — there is only ever one active switch target at a time).
-// A gesture-driven switch reports success before the Dock has actually
-// committed it, so CGSCopyManagedDisplaySpaces can still read the old index
-// for a while afterward. Trusting the last index we switched to instead of
-// that stale read avoids miscounting steps on a hotkey pressed again quickly.
+// Single-display-only prediction cache (see README "Single display only").
+// A gesture-driven switch reports success before the Dock commits it, and the
+// Dock fires a space-change notification for every intermediate hop of a
+// burst. Trusting either while gestures are in flight miscounts steps; on
+// macOS 27 an overshoot past the last space wedges the Dock (black screen).
+// The last index switched to stays authoritative until the Dock has been
+// quiet for kPredictionTTL.
+static const CFTimeInterval kPredictionTTL = 1.0;
+static CFAbsoluteTime g_lastGestureTime = 0;
 static bool g_hasPredictedIndex = false;
 static unsigned int g_predictedIndex = 0;
 
+bool iss_gestures_in_flight(void) {
+    return CFAbsoluteTimeGetCurrent() - g_lastGestureTime < kPredictionTTL;
+}
+
+static bool iss_get_prediction(unsigned int spaceCount, unsigned int *outIndex) {
+    if (!g_hasPredictedIndex || !iss_gestures_in_flight() || g_predictedIndex >= spaceCount) {
+        g_hasPredictedIndex = false;
+        return false;
+    }
+    *outIndex = g_predictedIndex;
+    return true;
+}
+
+static void iss_set_prediction(unsigned int index) {
+    g_hasPredictedIndex = true;
+    g_predictedIndex = index;
+}
+
 void iss_reset_predictions(void) {
+    if (iss_gestures_in_flight()) {
+        return;
+    }
     g_hasPredictedIndex = false;
 }
 
@@ -104,6 +128,16 @@ void iss_reset_predictions(void) {
 
 static const CGEventField kCGEventGestureSwipePositionX = (CGEventField)125;
 static const CGEventField kCGEventGestureSwipePositionY = (CGEventField)126;
+// Fields a real trackpad swipe carries (from FasterSwiper's traces).
+static const CGEventField kCGEventGesturePhaseAlias = (CGEventField)134;
+static const CGEventField kCGEventGestureZoomDeltaY = (CGEventField)138;
+static const CGEventField kCGEventSourceUnixProcessIDAlias = (CGEventField)169;
+
+// The ended-phase fling is what commits the switch; the payload is 16.16
+// fixed point (max ~32767). Progress 0.1: near-zero progress lands on a black
+// space on 27.0.1, full progress flashes the previous space.
+static const double kISSFlingVelocity = 9999.0;
+static const double kISSSwipeProgress = 0.1;
 
 static const uint32_t kISSHIDEventTypeVelocity = 9;
 static const uint32_t kISSHIDEventTypeFluidTouch = 23;
@@ -165,8 +199,11 @@ static bool iss_post_augmented_gesture(int phase, double progress, double veloci
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeProgress, progress);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, velocityX);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, 0);
-    CGEventSetDoubleValueField(ev, kCGEventGestureSwipePositionX, 0);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipePositionX, 0.1);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipePositionY, 0);
+    CGEventSetIntegerValueField(ev, kCGEventGesturePhaseAlias, phase);
+    CGEventSetDoubleValueField(ev, kCGEventGestureZoomDeltaY, 3.0);
+    CGEventSetDoubleValueField(ev, kCGEventSourceUnixProcessIDAlias, (double)mach_absolute_time());
 
     // Build the hidden IOHID queue element: header + fluid-touch (+ velocity).
     uint8_t blob[sizeof(ISSHIDQueueElement) + sizeof(ISSHIDFluidTouch) + sizeof(ISSHIDVelocity)];
@@ -209,6 +246,12 @@ static bool iss_post_augmented_gesture(int phase, double progress, double veloci
     }
     const uint8_t *src = CFDataGetBytePtr(data);
     CFIndex srcLen = CFDataGetLength(data);
+    // Only serialization format 2 is known to accept an appended field.
+    if (srcLen < 4 || src[0] != 0 || src[1] != 0 || src[2] != 0 || src[3] != 2) {
+        fprintf(stderr, "ISS: unknown CGEvent serialization format\n");
+        CFRelease(data);
+        return false;
+    }
 
     // Append field 4205 (binary blob): [be16 byteLen][be16 tag<<14|field][bytes].
     // tag 0b00 with size > 1 = binary blob; the deserializer is order-agnostic
@@ -236,20 +279,38 @@ static bool iss_post_augmented_gesture(int phase, double progress, double veloci
     if (!augmented) {
         return false;
     }
+    // The Dock ignores a DockControl event without a companion gesture event.
+    CGEventRef companion = CGEventCreate(NULL);
+    if (!companion) {
+        CFRelease(augmented);
+        return false;
+    }
+    CGEventSetIntegerValueField(companion, kCGSEventTypeField, kCGSEventGesture);
     CGEventPost(kCGSessionEventTap, augmented);
+    CGEventPost(kCGSessionEventTap, companion);
     CFRelease(augmented);
+    CFRelease(companion);
     return true;
 }
 
-static bool iss_post_switch_gesture_aug(ISSDirection direction, double velocity) {
-    bool increase = (direction == ISSDirectionRight);
-    double progress = increase ? -1.0 : 1.0;
-    double signedVelocity = increase ? -velocity : velocity;
-    if (!iss_post_augmented_gesture((int)kCGSGesturePhaseBegan, 0.0, 0.0)) {
-        return false;
-    }
-    usleep(3000);
-    return iss_post_augmented_gesture((int)kCGSGesturePhaseEnded, progress, signedVelocity);
+// On macOS 27 a higher space index is negative, and the Dock reads the posted
+// sign through the natural scrolling preference, so it flips with it off.
+static double iss_aug_swipe_sign(ISSDirection direction) {
+    Boolean valid = false;
+    Boolean natural = CFPreferencesGetAppBooleanValue(CFSTR("com.apple.swipescrolldirection"),
+                                                      kCFPreferencesAnyApplication, &valid);
+    double sign = (direction == ISSDirectionRight) ? -1.0 : 1.0;
+    return (!valid || natural) ? sign : -sign;
+}
+
+// One space per gesture: began, changed, ended; only ended carries velocity.
+static bool iss_post_switch_gesture_aug(ISSDirection direction) {
+    double sign = iss_aug_swipe_sign(direction);
+    double progress = sign * kISSSwipeProgress;
+    g_lastGestureTime = CFAbsoluteTimeGetCurrent();
+    return iss_post_augmented_gesture((int)kCGSGesturePhaseBegan, progress, 0.0)
+        && iss_post_augmented_gesture((int)kCGSGesturePhaseChanged, progress, 0.0)
+        && iss_post_augmented_gesture((int)kCGSGesturePhaseEnded, progress, sign * kISSFlingVelocity);
 }
 
 static bool cgs_symbols_available(void) {
@@ -280,11 +341,13 @@ extern int _SLPSSetFrontProcessWithOptions(ISSProcessSerialNumber *psn, uint32_t
 extern int SLPSPostEventRecordTo(ISSProcessSerialNumber *psn, uint8_t *bytes) __attribute__((weak_import));
 
 static void iss_make_key_window(ISSProcessSerialNumber *psn, uint32_t wid) {
-    uint8_t bytes[0xf8] = {0};
+    // The record declares 0xf8 bytes, but WindowServer reads past it.
+    uint8_t bytes[0x100] = {0};
     bytes[0x04] = 0xf8;
     bytes[0x3a] = 0x10;
     memcpy(bytes + 0x3c, &wid, sizeof(uint32_t));
-    memset(bytes + 0x20, 0xff, 0x10);
+    CGPoint outside = CGPointMake(-1, -1);
+    memcpy(bytes + 0x20, &outside, sizeof outside);
 
     bytes[0x08] = 0x01;  // make-key activate record
     SLPSPostEventRecordTo(psn, bytes);
@@ -744,12 +807,10 @@ bool iss_switch_to_index(unsigned int targetIndex) {
         targetIndex = info.spaceCount - 1;
     }
 
-    unsigned int currentIndex = (g_hasPredictedIndex && g_predictedIndex < info.spaceCount)
-        ? g_predictedIndex : info.currentIndex;
+    unsigned int currentIndex = info.currentIndex;
+    iss_get_prediction(info.spaceCount, &currentIndex);
 
     if (currentIndex == targetIndex) {
-        g_hasPredictedIndex = true;
-        g_predictedIndex = targetIndex;
         return !outOfBounds;
     }
 
@@ -757,13 +818,13 @@ bool iss_switch_to_index(unsigned int targetIndex) {
     unsigned int steps = direction == ISSDirectionRight ? (targetIndex - currentIndex) : (currentIndex - targetIndex);
 
     for (unsigned int i = 0; i < steps; i++) {
+        g_lastGestureTime = CFAbsoluteTimeGetCurrent();
         if (!iss_post_switch_gesture(direction)) {
             return false;
         }
     }
 
-    g_hasPredictedIndex = true;
-    g_predictedIndex = targetIndex;
+    iss_set_prediction(targetIndex);
     return !outOfBounds;
 }
 
@@ -781,37 +842,25 @@ bool iss_switch_to_index_aug(unsigned int targetIndex) {
         targetIndex = info.spaceCount - 1;
     }
 
-    // A gesture-driven switch reports success before CGS reflects it, so a
-    // hotkey pressed again quickly would otherwise see the pre-switch index
-    // here and miscount steps. Trust the last index we switched to instead,
-    // as long as it's still in bounds (see g_predictedIndex above).
-    unsigned int currentIndex = (g_hasPredictedIndex && g_predictedIndex < info.spaceCount)
-        ? g_predictedIndex : info.currentIndex;
+    unsigned int currentIndex = info.currentIndex;
+    iss_get_prediction(info.spaceCount, &currentIndex);
 
     if (currentIndex == targetIndex) {
-        g_hasPredictedIndex = true;
-        g_predictedIndex = targetIndex;
         return !outOfBounds;
     }
 
-    // Each gesture moves exactly one space, so a far jump steps through the
-    // spaces in between (inherent to the Dock-driven path; teleport via the SLS
-    // transaction mangles the menu bar — dead end, see notes). The Dock pipelines
-    // gestures posted in quick succession without waiting for each to commit, so
-    // a fast BURST — post exactly N gestures back-to-back, velocity scaled by
-    // distance — covers the ground without a fixed per-step delay.
+    // Each gesture moves exactly one space; the Dock pipelines gestures posted
+    // back-to-back, so a far jump is a burst of N gestures (teleport via the
+    // SLS transaction mangles the menu bar — dead end, see notes).
     ISSDirection direction = currentIndex < targetIndex ? ISSDirectionRight : ISSDirectionLeft;
     unsigned int steps = direction == ISSDirectionRight
         ? (targetIndex - currentIndex)
         : (currentIndex - targetIndex);
-    const double BASE_VELOCITY = 400.0;
-    double velocity = BASE_VELOCITY * steps;
     for (unsigned int i = 0; i < steps; i++) {
-        if (!iss_post_switch_gesture_aug(direction, velocity)) {
+        if (!iss_post_switch_gesture_aug(direction)) {
             return false;
         }
     }
-    g_hasPredictedIndex = true;
-    g_predictedIndex = targetIndex;
+    iss_set_prediction(targetIndex);
     return !outOfBounds;
 }
