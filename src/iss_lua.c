@@ -27,6 +27,12 @@ static int l_focus_window(lua_State *L) {
     return 1;
 }
 
+static int l_reset_predictions(lua_State *L) {
+    (void)L;
+    iss_reset_predictions();
+    return 0;
+}
+
 static int l_get_space_info(lua_State *L) {
     ISSSpaceInfo info;
     if (iss_get_menubar_space_info(&info)) {
@@ -47,6 +53,7 @@ static const struct luaL_Reg isslib[] = {
     {"switchToIndexAug", l_switch_to_index_aug},
     {"getSpaceInfo", l_get_space_info},
     {"focusWindow", l_focus_window},
+    {"resetPredictions", l_reset_predictions},
     {NULL, NULL}
 };
 

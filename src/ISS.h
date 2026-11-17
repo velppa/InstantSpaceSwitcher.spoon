@@ -66,4 +66,13 @@ bool iss_switch_to_index_aug(unsigned int targetIndex);
  */
 bool iss_focus_window(unsigned int windowID);
 
+/**
+ * @brief Clears the cached predicted space index so the next switch/query
+ *        falls back to a live CGS read.
+ * @note Call this whenever the active space changes by a means other than
+ *       iss_switch_to_index()/iss_switch_to_index_aug() (e.g. a trackpad
+ *       swipe or Mission Control), so a stale prediction can't linger.
+ */
+void iss_reset_predictions(void);
+
 #endif /* ISS_h */

@@ -5,7 +5,6 @@ This repo contains two things: InstantSpaceSwitcher.spoon and
 frontmost-window utility.
 
 * 1. InstantSpaceSwitcher.spoon
-
 [[doc/iss-spoon-1.png]] [[doc/iss-spoon-7.png]] [[doc/iss-spoon-8.png]]
 
 A [[https://www.hammerspoon.org/][Hammerspoon]] Spoon that switches macOS Spaces instantly (no
@@ -118,24 +117,25 @@ Compile =iss_lua.c= (Lua bindings) and =ISS.c= (gesture posting)
 into a shared library that Hammerspoon loads at runtime.
 
 #+begin_src sh :results silent
-SRC=~/Developer/src/github.com/velppa/InstantSpaceSwitcher.spoon/src
+SRC=src
 LUA_FW=/Applications/Hammerspoon.app/Contents/Frameworks
 
 mkdir -p ~/.local/lib
 
 clang -shared -o ~/.local/lib/iss.so \
-  $SRC/iss_lua.c $SRC/ISS.c \
-  -I $SRC \
+  src/iss_lua.c src/ISS.c \
+  -I src \
   -I "$LUA_FW/LuaSkin.framework/Headers" \
   -F "$LUA_FW" \
   -framework LuaSkin -framework ApplicationServices -framework CoreFoundation -framework IOKit \
+  -Wl,-undefined,dynamic_lookup \
   -rpath "$LUA_FW"
 #+end_src
 
 ** Install
 1. Symlink the Spoon into Hammerspoon's directory
   #+begin_src sh
-ln -s ~/Developer/src/github.com/velppa/InstantSpaceSwitcher.spoon \
+ln -s ~/.velppa/InstantSpaceSwitcher.spoon \
   ~/.hammerspoon/Spoons/InstantSpaceSwitcher.spoon
   #+end_src
 

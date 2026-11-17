@@ -79,11 +79,16 @@ local function updateMenuBar(self, index)
       self._menubar:setIcon(cachedIcons[index] or cachedIcons[1], false)
       self._menubar:setTitle("")
    end
+   self._lastShownIndex = index
 end
 
+-- Only touch the icon when the reported space actually differs from what's
+-- already showing. hs.spaces.watcher fires after switchToSpace has already
+-- set the icon instantly (optimistically, from the target index); a redundant
+-- setIcon() to the same value here just flickers the menu bar a beat later.
 local function refreshMenuBar(self)
    local info = iss.getSpaceInfo()
-   if info then
+   if info and info.current ~= self._lastShownIndex then
       updateMenuBar(self, info.current)
    end
 end
@@ -336,8 +341,11 @@ function obj:start()
       table.insert(self._hotkeys, hk)
    end
 
-   -- Watch for space changes (swipe, Mission Control, etc.)
+   -- Watch for space changes (swipe, Mission Control, etc.). These bypass
+   -- switchToSpace, so the C library's predicted index (set only by
+   -- iss.switchToIndex/switchToIndexAug) would otherwise go stale.
    self._spaceWatcher = hs.spaces.watcher.new(function()
+      iss.resetPredictions()
       refreshMenuBar(self)
    end)
    self._spaceWatcher:start()

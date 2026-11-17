@@ -73,7 +73,20 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
 static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
 static bool iss_post_switch_gesture(ISSDirection direction);
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction);
-static bool iss_post_switch_gesture_aug(ISSDirection direction);
+static bool iss_post_switch_gesture_aug(ISSDirection direction, double velocity);
+
+// Single-display-only prediction cache (see README "Single display only"
+// limitation — there is only ever one active switch target at a time).
+// A gesture-driven switch reports success before the Dock has actually
+// committed it, so CGSCopyManagedDisplaySpaces can still read the old index
+// for a while afterward. Trusting the last index we switched to instead of
+// that stale read avoids miscounting steps on a hotkey pressed again quickly.
+static bool g_hasPredictedIndex = false;
+static unsigned int g_predictedIndex = 0;
+
+void iss_reset_predictions(void) {
+    g_hasPredictedIndex = false;
+}
 
 // --- macOS 27 (Golden Gate) augmented dock-swipe gesture ---
 //
@@ -228,15 +241,15 @@ static bool iss_post_augmented_gesture(int phase, double progress, double veloci
     return true;
 }
 
-static bool iss_post_switch_gesture_aug(ISSDirection direction) {
+static bool iss_post_switch_gesture_aug(ISSDirection direction, double velocity) {
     bool increase = (direction == ISSDirectionRight);
     double progress = increase ? -1.0 : 1.0;
-    double velocity = increase ? -400.0 : 400.0;
+    double signedVelocity = increase ? -velocity : velocity;
     if (!iss_post_augmented_gesture((int)kCGSGesturePhaseBegan, 0.0, 0.0)) {
         return false;
     }
     usleep(3000);
-    return iss_post_augmented_gesture((int)kCGSGesturePhaseEnded, progress, velocity);
+    return iss_post_augmented_gesture((int)kCGSGesturePhaseEnded, progress, signedVelocity);
 }
 
 static bool cgs_symbols_available(void) {
@@ -731,12 +744,17 @@ bool iss_switch_to_index(unsigned int targetIndex) {
         targetIndex = info.spaceCount - 1;
     }
 
-    if (info.currentIndex == targetIndex) {
+    unsigned int currentIndex = (g_hasPredictedIndex && g_predictedIndex < info.spaceCount)
+        ? g_predictedIndex : info.currentIndex;
+
+    if (currentIndex == targetIndex) {
+        g_hasPredictedIndex = true;
+        g_predictedIndex = targetIndex;
         return !outOfBounds;
     }
 
-    ISSDirection direction = info.currentIndex < targetIndex ? ISSDirectionRight : ISSDirectionLeft;
-    unsigned int steps = direction == ISSDirectionRight ? (targetIndex - info.currentIndex) : (info.currentIndex - targetIndex);
+    ISSDirection direction = currentIndex < targetIndex ? ISSDirectionRight : ISSDirectionLeft;
+    unsigned int steps = direction == ISSDirectionRight ? (targetIndex - currentIndex) : (currentIndex - targetIndex);
 
     for (unsigned int i = 0; i < steps; i++) {
         if (!iss_post_switch_gesture(direction)) {
@@ -744,6 +762,8 @@ bool iss_switch_to_index(unsigned int targetIndex) {
         }
     }
 
+    g_hasPredictedIndex = true;
+    g_predictedIndex = targetIndex;
     return !outOfBounds;
 }
 
@@ -761,29 +781,37 @@ bool iss_switch_to_index_aug(unsigned int targetIndex) {
         targetIndex = info.spaceCount - 1;
     }
 
+    // A gesture-driven switch reports success before CGS reflects it, so a
+    // hotkey pressed again quickly would otherwise see the pre-switch index
+    // here and miscount steps. Trust the last index we switched to instead,
+    // as long as it's still in bounds (see g_predictedIndex above).
+    unsigned int currentIndex = (g_hasPredictedIndex && g_predictedIndex < info.spaceCount)
+        ? g_predictedIndex : info.currentIndex;
+
+    if (currentIndex == targetIndex) {
+        g_hasPredictedIndex = true;
+        g_predictedIndex = targetIndex;
+        return !outOfBounds;
+    }
+
     // Each gesture moves exactly one space, so a far jump steps through the
     // spaces in between (inherent to the Dock-driven path; teleport via the SLS
     // transaction mangles the menu bar — dead end, see notes). The Dock pipelines
-    // gestures posted in quick succession WITHOUT waiting for each to commit, so
-    // a fast fixed-delay BURST — post exactly N gestures, ~2 ms apart, no waiting
-    // — covers the distance in ~5 ms/space (~50 ms for 2↔10, ~5× faster than
-    // waiting for each commit). Measured 6/6 exact in BOTH directions at 1–6 ms
-    // spacing, so no feedback correction is needed: the burst posts exactly the
-    // step count and never overshoots. (An earlier feedback top-up was REMOVED —
-    // it raced the gesture commit and double-posted, causing the bounce/flash and
-    // off-by-one landings, especially leftward near the low edge.)
-    ISSDirection direction = info.currentIndex < targetIndex ? ISSDirectionRight : ISSDirectionLeft;
+    // gestures posted in quick succession without waiting for each to commit, so
+    // a fast BURST — post exactly N gestures back-to-back, velocity scaled by
+    // distance — covers the ground without a fixed per-step delay.
+    ISSDirection direction = currentIndex < targetIndex ? ISSDirectionRight : ISSDirectionLeft;
     unsigned int steps = direction == ISSDirectionRight
-        ? (targetIndex - info.currentIndex)
-        : (info.currentIndex - targetIndex);
-    const unsigned int BURST_STEP_US = 2000;   // inter-gesture delay in the burst
+        ? (targetIndex - currentIndex)
+        : (currentIndex - targetIndex);
+    const double BASE_VELOCITY = 400.0;
+    double velocity = BASE_VELOCITY * steps;
     for (unsigned int i = 0; i < steps; i++) {
-        if (!iss_post_switch_gesture_aug(direction)) {
+        if (!iss_post_switch_gesture_aug(direction, velocity)) {
             return false;
         }
-        if (i + 1 < steps) {
-            usleep(BURST_STEP_US);
-        }
     }
+    g_hasPredictedIndex = true;
+    g_predictedIndex = targetIndex;
     return !outOfBounds;
 }
